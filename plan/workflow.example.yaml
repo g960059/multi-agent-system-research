@@ -1,0 +1,57 @@
+workflow_id: product-delivery-v1
+version: 1
+max_iterations: 3
+
+# Canonical flow:
+# research(3) -> requirements(1) -> planning/review(2)
+# -> implementation(4) + continuous review(2)
+# -> final review(3) -> fail_blocking => implementation
+
+stages:
+  - id: research
+    strategy: parallel
+    agents: [market_researcher, paper_researcher, competitor_researcher]
+    outputs: [research_report]
+
+  - id: requirements
+    strategy: single
+    agents: [requirements_owner]
+    depends_on: [research]
+    outputs: [requirements_spec]
+
+  - id: planning
+    strategy: parallel
+    agents: [planner, plan_reviewer]
+    depends_on: [requirements]
+    outputs: [implementation_plan, review_notes]
+
+  - id: implementation
+    strategy: parallel
+    agents: [frontend_coder, backend_coder, doc_coder, test_coder]
+    depends_on: [planning]
+    touched_paths:
+      frontend_coder: ["apps/web/**"]
+      backend_coder: ["apps/api/**"]
+      doc_coder: ["docs/**"]
+      test_coder: ["tests/**"]
+    outputs: [patches]
+
+  - id: continuous_review
+    strategy: service
+    agents: [review_team, codebase_team]
+    depends_on: [implementation]
+    gate: non_blocking_feedback
+
+  - id: final_review
+    strategy: parallel
+    agents: [security_reviewer, performance_reviewer, architecture_reviewer]
+    depends_on: [implementation, continuous_review]
+    gate: blocking_zero
+
+transitions:
+  - from: final_review
+    on: pass
+    to: done
+  - from: final_review
+    on: fail_blocking
+    to: implementation
