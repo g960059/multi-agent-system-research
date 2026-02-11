@@ -41,7 +41,8 @@ Recommended layering:
   - `task_id`, `msg_id`, `parent_id`, `state_version`, `summary_hash`
 - Agent tracks `last_seen_msg_id`.
 - If sequence gaps or hash mismatch are detected, return `resync-required`.
-- Keep a task state capsule (`state/<task_id>.md`) as canonical context.
+- Keep canonical task state in the State Store (DB).
+- Treat `state/<task_id>.md` as an optional agent-facing summary projection/cache.
 
 This gives:
 - Fast path: unread-only processing
@@ -106,12 +107,21 @@ Start with simple polling; optimize later only if needed.
 - Continue until gate passes or `max_iterations` is reached.
 - Gate checks can include tests/lint/security/secret scan.
 
-## 9. Recommended System Split
-Implement as 4 cooperating subsystems:
-1. `workflow` system (stage transitions)
-2. `mailbox` system (message transport)
-3. `task` system (state, retries, leases, DLQ)
-4. `runtime` system (polling, heartbeat, worker supervision)
+## 9. Recommended Module Split
+For detailed design, use 7 modules:
+1. `workflow` (stage transitions)
+2. `task` (state, retries, leases, DLQ)
+3. `reservation` (file conflict control)
+4. `mailbox` (message transport)
+5. `runtime supervisor` (polling, heartbeat, worker supervision)
+6. `gateway` (hooks/CLI adapter)
+7. `state store` (event log / projections)
+
+Operationally, these can still be grouped into 4 layers:
+1. `workflow`
+2. `task`
+3. `mailbox`
+4. `runtime` (including reservation/gateway/state-store operations)
 
 ## 10. Suggested Minimal Rollout
 1. Single coder + single reviewer with mailbox and basic gate loop.

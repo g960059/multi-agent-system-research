@@ -353,6 +353,11 @@
 5. 実装/レビュー結果を mailbox で送信
 6. gate判定後に done または rework を遷移
 
+補足:
+
+- Task module は mailbox を直接操作しない。
+- `TaskCompleted` / `TaskFailed` などのイベントを発行し、Runtime/Worker が mailbox 配送を担当する。
+
 ### Flow-02 レビュー差し戻し
 
 1. reviewer が FAIL(blocking) を返す
@@ -380,7 +385,27 @@
 
 ```yaml
 workflow_id: product-delivery-v1
+version: 1
 max_iterations: 3
+
+gates:
+  blocking_zero:
+    type: reviewer_verdict
+    pass_when: "blocking_count == 0"
+    fail_signal: fail_blocking
+  non_blocking_feedback:
+    type: advisory
+    pass_when: "true"
+    fail_signal: none
+
+artifacts:
+  storage: state_store
+  message_transport: mailbox_reference
+  retention: until_workflow_complete
+
+rework_policy:
+  max_iterations_from: workflow.max_iterations
+  on_max_reached: manual_review_required
 
 stages:
   - id: research
@@ -413,8 +438,10 @@ stages:
 
   - id: continuous_review
     strategy: service
+    starts_with: implementation
+    completion_trigger: implementation_done
     agents: [review_team, codebase_team]
-    depends_on: [implementation]
+    depends_on: [planning]
     gate: non_blocking_feedback
 
   - id: final_review
@@ -433,6 +460,11 @@ transitions:
 ```
 
 実ファイル版: `plan/workflow.example.yaml`
+
+補足:
+
+- `outputs` は artifact ID として `state_store` に保存し、mailbox では参照IDを配送する。
+- 差し戻し回数（attempt_count）は task module が管理し、workflow側は `rework_policy.max_iterations_from` で上限のみ規定する。
 
 ## 7. 実行戦略（hooks版 / 外部script版）
 

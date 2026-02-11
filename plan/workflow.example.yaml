@@ -2,6 +2,25 @@ workflow_id: product-delivery-v1
 version: 1
 max_iterations: 3
 
+gates:
+  blocking_zero:
+    type: reviewer_verdict
+    pass_when: "blocking_count == 0"
+    fail_signal: fail_blocking
+  non_blocking_feedback:
+    type: advisory
+    pass_when: "true"
+    fail_signal: none
+
+artifacts:
+  storage: state_store
+  message_transport: mailbox_reference
+  retention: until_workflow_complete
+
+rework_policy:
+  max_iterations_from: workflow.max_iterations
+  on_max_reached: manual_review_required
+
 # Canonical flow:
 # research(3) -> requirements(1) -> planning/review(2)
 # -> implementation(4) + continuous review(2)
@@ -38,8 +57,10 @@ stages:
 
   - id: continuous_review
     strategy: service
+    starts_with: implementation
+    completion_trigger: implementation_done
     agents: [review_team, codebase_team]
-    depends_on: [implementation]
+    depends_on: [planning]
     gate: non_blocking_feedback
 
   - id: final_review

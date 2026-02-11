@@ -205,16 +205,21 @@
 
 - Workflow -> Task
 - Task -> Reservation
-- Task -> Mailbox
-- Runtime -> Task
+- Runtime -> Task/Mailbox/Reservation
 - Gateway -> Task/Mailbox（変換のみ）
-- 全モジュール -> State Store
+- Workflow/Task/Reservation/Mailbox/Runtime -> State Store
 
 禁止依存:
 
 - Mailbox -> Task（逆参照禁止）
+- Task -> Mailbox（直接呼び出し禁止。Taskはイベント発行のみ）
 - Reservation -> Workflow
 - Gateway -> Stateを直接更新（必ずTask/Mailbox経由）
+
+補足:
+
+- Task完了通知は `TaskCompleted` イベントを正とし、Mailbox送信は Runtime/Worker 側で行う。
+- Task module は配送先や送信タイミングを知らない（配送責務を持たない）。
 
 ## 5. 契約（Interface Contracts）
 
@@ -332,6 +337,46 @@ export interface MailboxModule {
   fanout(input: FanoutCommand): Promise<string[]>;
 }
 ```
+
+## 5.5 Workflow DSL 契約（曖昧化防止）
+
+必須セクション:
+
+- `gates`
+  - 例: `blocking_zero`, `non_blocking_feedback`
+  - 必須キー: `type`, `pass_when`, `fail_signal`
+- `artifacts`
+  - 必須キー: `storage`, `message_transport`, `retention`
+- `rework_policy`
+  - 必須キー: `max_iterations_from`, `on_max_reached`
+
+`strategy: service` ステージの必須キー:
+
+- `starts_with`
+- `completion_trigger`
+
+規約:
+
+- `stages[*].gate` は必ず `gates` のキーを参照する。
+- `outputs` は artifact ID として扱い、実体保管は `artifacts.storage` に従う。
+- mailbox payload には artifact 本文を載せず、参照IDのみを載せる。
+
+## 5.6 State Store 方針（Event Sourcing）
+
+基本方針:
+
+- 正本は event log（append-only）とする。
+- 読み取りは projection を利用する。
+- projection 更新は projector で一元管理する。
+
+禁止:
+
+- 各モジュールが projection テーブルを直接更新すること。
+
+MVP例外:
+
+- 既存実装都合で直接更新が必要な場合でも、同一トランザクションで対応イベントを必ず追記する。
+- 例外は期限付きとし、event-first へ移行するタスクを backlog 化する。
 
 ## 6. 互換性ポリシー
 

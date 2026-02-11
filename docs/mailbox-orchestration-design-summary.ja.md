@@ -41,7 +41,8 @@
   - `task_id`, `msg_id`, `parent_id`, `state_version`, `summary_hash`
 - agent は `last_seen_msg_id` を保持。
 - 欠番やハッシュ不一致時は `resync-required` を返す。
-- タスク正本として `state/<task_id>.md` を維持する。
+- タスク正本は State Store（DB）に置く。
+- `state/<task_id>.md` は agent向けサマリ投影（任意キャッシュ）として扱う。
 
 これにより:
 - 通常時: 未読のみで高速処理
@@ -106,12 +107,21 @@
 - `max_iterations` 到達で `manual-review-required` へ遷移。
 - gate例: tests/lint/security/secret scan。
 
-## 9. 推奨サブシステム分割
-次の4サブシステムで設計する:
+## 9. 推奨モジュール分割
+詳細設計として、次の7モジュールで分割する:
 1. `workflow`（段階遷移）
-2. `mailbox`（配送）
-3. `task`（状態、リトライ、lease、DLQ）
-4. `runtime`（polling、heartbeat、監視）
+2. `task`（状態、リトライ、lease、DLQ）
+3. `reservation`（file競合制御）
+4. `mailbox`（配送）
+5. `runtime supervisor`（polling、heartbeat、監視）
+6. `gateway`（hooks/CLI adapter）
+7. `state store`（event log / projection）
+
+運用上は次の4レイヤーとしてまとめて扱える:
+1. `workflow`
+2. `task`
+3. `mailbox`
+4. `runtime`（reservation/gateway/state storeを含む）
 
 ## 10. 最小導入ステップ
 1. coder 1 + reviewer 1 の mailbox 連携を先に実装。
