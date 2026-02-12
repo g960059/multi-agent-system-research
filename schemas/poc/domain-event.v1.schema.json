@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/poc/domain-event.v1.schema.json",
+  "title": "Domain Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "TaskAssigned",
+        "ReviewResultReceived",
+        "ReviewQuorumReached",
+        "AggregationDecided",
+        "TaskSoftTimedOut",
+        "TaskHardTimedOut",
+        "TaskRequeued",
+        "TaskCompleted"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_type",
+    "task_id",
+    "state_version",
+    "occurred_at",
+    "payload"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "TaskAssigned"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "worker_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "worker_id"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "ReviewResultReceived"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "agent_id": {
+                "type": "string",
+                "enum": [
+                  "codex",
+                  "claude"
+                ]
+              },
+              "msg_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "PASS",
+                  "FAIL"
+                ]
+              },
+              "blocking_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "agent_id",
+              "msg_id",
+              "verdict",
+              "blocking_count"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "ReviewQuorumReached"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "required_reviewer_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "codex",
+                    "claude"
+                  ]
+                },
+                "minItems": 1
+              },
+              "received_reviewer_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "codex",
+                    "claude"
+                  ]
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "required_reviewer_ids",
+              "received_reviewer_ids"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "AggregationDecided"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "PASS",
+                  "FAIL"
+                ]
+              },
+              "blocking_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "disagree": {
+                "type": "boolean"
+              },
+              "next_action": {
+                "type": "string",
+                "enum": [
+                  "proceed",
+                  "rework",
+                  "manual_review_required"
+                ]
+              }
+            },
+            "required": [
+              "verdict",
+              "blocking_count",
+              "disagree",
+              "next_action"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "TaskSoftTimedOut",
+              "TaskHardTimedOut"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "TaskRequeued"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "attempt_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "attempt_count",
+              "reason"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "TaskCompleted"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "PASS",
+                  "FAIL"
+                ]
+              }
+            },
+            "required": [
+              "verdict"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,124 @@
+version: 1
+mode: mailbox_only_review
+
+state_store:
+  type: sqlite
+  dsn: ./tmp/poc-mailbox/state/state.db
+
+mailbox:
+  root_dir: ./tmp/poc-mailbox/mailbox
+  delivery_guarantee: at_least_once
+  ordering_scope: task_id
+  visibility_timeout_sec: 60
+  assignment_ack_strategy: on_consume_with_receipt
+  review_result_ack_strategy: on_consume_with_receipt
+  assignment_ack_before_execution: true
+  review_result_ack_on_duplicate: true
+  max_delivery_attempts: 5
+
+scheduler:
+  poll_interval_ms: 1000
+  idle_backoff_ms: [1000, 2000, 4000, 5000]
+
+heartbeat:
+  interval_sec: 15
+  ttl_sec: 45
+
+lease:
+  ttl_sec: 180
+  renew_interval_sec: 45
+
+timeouts:
+  task_soft_timeout_sec: 600
+  task_hard_timeout_sec: 900
+
+workers:
+  codex:
+    enabled: true
+    instances: 1
+    spawn_policy: per_task_process
+    command_template:
+      - codex
+      - exec
+      - --full-auto
+      - --sandbox
+      - read-only
+      - --cd
+      - "{repo_root}"
+      - "{prompt}"
+  claude:
+    enabled: true
+    instances: 1
+    spawn_policy: per_task_process
+    command_template:
+      - claude
+      - -p
+      - "{prompt}"
+  aggregator:
+    enabled: true
+    instances: 1
+    spawn_policy: long_running
+    command_template:
+      - node
+      - dist/aggregator.js
+  orchestrator:
+    enabled: true
+    instances: 1
+    spawn_policy: long_running
+    command_template:
+      - node
+      - dist/orchestrator.js
+
+review:
+  required_agents: [codex, claude]
+  quorum: all
+  aggregation_policy: blocking_zero
+  disagree_policy: manual_review_required
+  review_result_consumer: aggregator
+  aggregation_result_consumer: orchestrator
+
+retries:
+  max_attempts: 2
+  backoff_sec: [10, 30]
+
+dead_letter:
+  enabled: true
+  queue_name: deadletter
+
+security:
+  require_signature: true
+  signature_algorithm: hmac_sha256
+  require_key_id: true
+  canonicalization: json_c14n_v1
+  nonce_ttl_sec: 300
+  max_clock_skew_sec: 120
+  identity_binding: sender_id_is_principal
+  require_from_sender_match: true
+  require_task_id_match: true
+  task_id_match_types: [review_result, aggregation_result]
+  on_task_id_mismatch: quarantine
+  on_sender_mismatch: quarantine
+  acl_default: deny
+  acl:
+    task_assignment: [orchestrator]
+    review_result: [codex, claude]
+    aggregation_result: [aggregator]
+    control: [orchestrator]
+    error: [orchestrator, codex, claude, aggregator]
+
+dedup:
+  key: [task_id, agent_id, msg_id]
+  store: state/message-receipts.jsonl
+  durable_across_restart: true
+  ttl_cleanup: disabled
+
+operational_gates:
+  reviewer_auth_error:
+    threshold: 1
+    action: stop_and_fix_auth
+  reviewer_network_error:
+    threshold: 2
+    action: manual_review_required
+  reviewer_execution_error:
+    threshold: 1
+    action: manual_review_required

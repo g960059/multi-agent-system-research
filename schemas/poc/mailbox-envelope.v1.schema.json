@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/poc/mailbox-envelope.v1.schema.json",
+  "title": "Mailbox Envelope v1",
+  "$comment": "Runtime must verify envelope.task_id == payload.task_id for review_result and aggregation_result; mismatch must be quarantined. Runtime must also verify from == sender_id and quarantine on mismatch.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "msg_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sender_id": {
+      "type": "string",
+      "enum": [
+        "orchestrator",
+        "codex",
+        "claude",
+        "aggregator"
+      ]
+    },
+    "sender_instance_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "key_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 8
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 16
+    },
+    "from": {
+      "type": "string",
+      "minLength": 1
+    },
+    "to": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "task_assignment",
+        "review_result",
+        "aggregation_result",
+        "error",
+        "control"
+      ]
+    },
+    "state_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "parent_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "delivery_attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "msg_id",
+    "schema_version",
+    "task_id",
+    "sender_id",
+    "sender_instance_id",
+    "key_id",
+    "issued_at",
+    "nonce",
+    "signature",
+    "from",
+    "to",
+    "type",
+    "state_version",
+    "delivery_attempt",
+    "created_at",
+    "payload"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "task_assignment"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "sender_id": {
+            "const": "orchestrator"
+          },
+          "payload": {
+            "$ref": "#/$defs/task_assignment_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "review_result"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "sender_id": {
+            "enum": [
+              "codex",
+              "claude"
+            ]
+          },
+          "payload": {
+            "$ref": "./review-result.v1.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "aggregation_result"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "sender_id": {
+            "const": "aggregator"
+          },
+          "to": {
+            "const": "orchestrator"
+          },
+          "payload": {
+            "$ref": "./aggregation-result.v1.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "error"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "sender_id": {
+            "enum": [
+              "orchestrator",
+              "codex",
+              "claude",
+              "aggregator"
+            ]
+          },
+          "payload": {
+            "$ref": "#/$defs/error_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "control"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "sender_id": {
+            "const": "orchestrator"
+          },
+          "payload": {
+            "$ref": "#/$defs/control_payload"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "task_assignment_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review_request_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required_agents": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude"
+            ]
+          },
+          "minItems": 1
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "review_request_ref",
+        "required_agents",
+        "instruction"
+      ]
+    },
+    "error_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "control_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "cancel",
+            "pause",
+            "resume"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  }
+}

@@ -108,6 +108,8 @@
 - FR-03-2: メッセージは task_id / msg_id / parent_id / state_version を持つこと。
 - FR-03-3: broadcast は orchestrator経由 fan-out のみ許可すること。
 - FR-03-4: message schema 不正は拒否・隔離できること。
+- FR-03-5: task状態遷移 / event追記 / outbox追加を同一トランザクションで確定できること。
+- FR-03-6: 配送保証は at-least-once とし、consumer側で `msg_id` 重複排除できること。
 
 ### FR-04 ファイル競合制御 `[MVP]`
 
@@ -139,6 +141,13 @@
 - FR-08-2 `[Later]`: hooks利用可能時は hooks adapter で gate を適用できること。
 - FR-08-3 `[MVP]`: どちらの実行系でも task state の最終整合が同じになること。
 
+### FR-09 メッセージ認証・認可 `[MVP]`
+
+- FR-09-1: envelope は `sender_id` / `sender_instance_id` / `issued_at` / `nonce` / `signature` を持つこと。
+- FR-09-2: Runtime は署名検証失敗メッセージを拒否・隔離できること。
+- FR-09-3: メッセージ `type` ごとに publish ACL を持ち、違反を拒否できること。
+- FR-09-4: `from == sender_id` および `envelope.task_id == payload.task_id`（対象typeのみ）を検証し、不一致を隔離できること。
+
 ## 4.2 非機能要件
 
 - NFR-01 信頼性
@@ -153,6 +162,7 @@
   - 新しいagent種別やレビューゲートを追加しやすいこと。
 - NFR-06 セキュリティ
   - シークレットはメッセージ本文に含めず参照IDで扱うこと。
+  - 送信者なりすましと改ざんを検知し、未認証メッセージを状態遷移に使わないこと。
 
 ## 4.3 制約
 
@@ -182,6 +192,12 @@
   - すべての状態遷移を永続化
 - hooks adapter（任意）
   - 利用可能環境での強制ゲートに接続
+
+### 5.1 MVP構成（Critical先行）
+
+- 論理設計は7モジュールを維持する。
+- ただしMVPは物理的に `Control Kernel`（Task Orchestrator + Runtime Supervisor + Mailbox Relay）へ集約する。
+- これにより `状態遷移 + event + outbox` の同一Tx境界を先に保証し、欠落通知を防ぐ。
 
 ## 6. アーキテクチャ詳細
 
@@ -318,15 +334,24 @@
 ```json
 {
   "msg_id": "msg-uuid",
+  "schema_version": 1,
   "task_id": "task-001",
+  "sender_id": "agent-backend-1",
+  "sender_instance_id": "worker-backend-1",
+  "key_id": "k-agent-backend-1-v1",
+  "issued_at": "2026-02-11T00:01:00Z",
+  "nonce": "nonce-uuid",
+  "signature": "base64-signature",
   "from": "agent-backend-1",
   "to": "agent-reviewer-1",
-  "type": "task_result",
-  "round_id": "round-2",
+  "type": "review_result",
   "parent_id": "msg-prev",
   "state_version": 14,
+  "delivery_attempt": 1,
   "created_at": "2026-02-11T00:01:00Z",
-  "payload": {}
+  "payload": {
+    "task_id": "task-001"
+  }
 }
 ```
 
@@ -350,19 +375,22 @@
 2. Task Orchestrator が runnable task を抽出
 3. worker が claim（owner + lease）
 4. Reservation Manager で touched_paths を予約
-5. 実装/レビュー結果を mailbox で送信
-6. gate判定後に done または rework を遷移
+5. worker が構造化結果を Task Orchestrator へ返す
+6. Task Orchestrator が `状態遷移 + イベント追記 + outbox追加` を同一Txで確定
+7. Runtime Relay が outbox から mailbox へ配送し、成功時に outbox を ack
+8. gate判定後に done または rework を遷移
 
 補足:
 
 - Task module は mailbox を直接操作しない。
 - `TaskCompleted` / `TaskFailed` などのイベントを発行し、Runtime/Worker が mailbox 配送を担当する。
+- Runtime は envelope 署名検証と `type` ACL 検査に通過したメッセージのみ処理する。
 
 ### Flow-02 レビュー差し戻し
 
 1. reviewer が FAIL(blocking) を返す
 2. orchestrator が関連taskを rework ステージへ再投入
-3. attempt_count と round_id を更新
+3. attempt_count と state_version を更新
 4. max_iterations 超過なら manual-review-required
 
 ### Flow-03 worker停止復旧
@@ -575,6 +603,10 @@ transitions:
   - compact後でも state_version 整合で再同期できる。
 - AC-07
   - hooks有無の2実行系で最終task状態が一致する。
+- AC-08
+  - 状態遷移成功後に relay worker が停止しても、再起動後に outbox 再送で通知欠落が起きない。
+- AC-09
+  - 署名不正 / nonce再利用 / ACL違反メッセージは拒否・隔離され、状態遷移が発火しない。
 
 ## 12. 主要リスクと対応
 
@@ -586,6 +618,8 @@ transitions:
   - 対応: blocking/non-blocking 分離
 - リスク4: 運用複雑化
   - 対応: CLI整備、runbook整備、段階導入
+- リスク5: なりすましメッセージによる誤遷移
+  - 対応: 署名検証、nonce失効管理、`type` ACL、隔離キュー
 
 ## 13. 実装候補（初期）
 

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/poc/aggregation-result.v1.schema.json",
+  "title": "Aggregation Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "required_agents": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "codex",
+          "claude"
+        ]
+      },
+      "minItems": 1
+    },
+    "received_agents": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "codex",
+          "claude"
+        ]
+      },
+      "minItems": 1
+    },
+    "quorum_reached": {
+      "type": "boolean"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "blocking_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "disagree": {
+      "type": "boolean"
+    },
+    "next_action": {
+      "type": "string",
+      "enum": [
+        "proceed",
+        "rework",
+        "manual_review_required"
+      ]
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_msg_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "task_id",
+    "required_agents",
+    "received_agents",
+    "quorum_reached",
+    "verdict",
+    "blocking_count",
+    "disagree",
+    "next_action",
+    "generated_at",
+    "source_msg_ids"
+  ]
+}

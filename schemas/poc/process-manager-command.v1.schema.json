@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/poc/process-manager-command.v1.schema.json",
+  "title": "Process Manager Command v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "tx",
+        "post_commit"
+      ]
+    },
+    "command_type": {
+      "type": "string",
+      "enum": [
+        "enqueue_outbox",
+        "persist_message_receipt",
+        "persist_nonce",
+        "requeue_task",
+        "request_cancel_execution",
+        "force_stop_execution",
+        "ack_message",
+        "nack_message"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "phase",
+    "command_type",
+    "task_id",
+    "payload"
+  ],
+  "oneOf": [
+    {
+      "properties": {
+        "phase": {
+          "const": "tx"
+        },
+        "command_type": {
+          "const": "enqueue_outbox"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "message_type": {
+              "type": "string",
+              "enum": [
+                "task_assignment",
+                "review_result",
+                "aggregation_result",
+                "error",
+                "control"
+              ]
+            },
+            "to": {
+              "type": "string",
+              "minLength": 1
+            },
+            "body": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "message_type",
+            "to",
+            "body"
+          ]
+        }
+      },
+      "required": [
+        "state_version"
+      ]
+    },
+    {
+      "properties": {
+        "phase": {
+          "const": "tx"
+        },
+        "command_type": {
+          "const": "persist_message_receipt"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "agent_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "msg_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "processed_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "agent_id",
+            "msg_id",
+            "processed_at"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "phase": {
+          "const": "tx"
+        },
+        "command_type": {
+          "const": "persist_nonce"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sender_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "nonce": {
+              "type": "string",
+              "minLength": 8
+            },
+            "issued_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "expire_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "sender_id",
+            "nonce",
+            "issued_at",
+            "expire_at"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "phase": {
+          "const": "tx"
+        },
+        "command_type": {
+          "const": "requeue_task"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "phase": {
+          "const": "post_commit"
+        },
+        "command_type": {
+          "const": "request_cancel_execution"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "phase": {
+          "const": "post_commit"
+        },
+        "command_type": {
+          "const": "force_stop_execution"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "phase": {
+          "const": "post_commit"
+        },
+        "command_type": {
+          "const": "ack_message"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "agent_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "msg_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "agent_id",
+            "msg_id"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "phase": {
+          "const": "post_commit"
+        },
+        "command_type": {
+          "const": "nack_message"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "agent_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "msg_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "agent_id",
+            "msg_id",
+            "reason"
+          ]
+        }
+      }
+    }
+  ]
+}

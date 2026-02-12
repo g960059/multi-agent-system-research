@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/poc/process-manager-plan.v1.schema.json",
+  "title": "Process Manager Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "tx_commands": {
+      "type": "array",
+      "items": {
+        "$ref": "./process-manager-command.v1.schema.json"
+      }
+    },
+    "post_commit_commands": {
+      "type": "array",
+      "items": {
+        "$ref": "./process-manager-command.v1.schema.json"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "tx_commands",
+    "post_commit_commands"
+  ],
+  "allOf": [
+    {
+      "properties": {
+        "tx_commands": {
+          "items": {
+            "properties": {
+              "phase": {
+                "const": "tx"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "post_commit_commands": {
+          "items": {
+            "properties": {
+              "phase": {
+                "const": "post_commit"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

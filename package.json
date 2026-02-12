@@ -1,0 +1,14 @@
+{
+  "name": "multi-agent-system-research",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mailbox-first multi-agent PoC runtime",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "poc:runtime": "npm run build && node dist/poc/runtime-main.js",
+    "poc:runtime:cli": "npm run build && node dist/poc/runtime-main.js --reviewer-mode cli --max-passes 6 --cli-timeout-ms 240000 --review-input-max-chars 80000 --review-input-excerpt-chars 12000",
+    "poc:cli:auth:sync": "npm run build && node dist/poc/cli-auth-sync.js",
+    "poc:cli:check": "npm run build && node dist/poc/cli-preflight.js",
+    "poc:e2e": "npm run build && node dist/poc/e2e.js"
+  }
+}

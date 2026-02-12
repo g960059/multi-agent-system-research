@@ -8,6 +8,7 @@
 - workflow runtime は自前実装（TAKTは設計参照のみ）。
 - 実装言語は TypeScript（Node.js）に統一する。
 - hooks は adapter 経由で後付け可能にし、主制御は外部runtimeで保持する。
+- Task状態遷移・イベント追記・Outbox追加は同一トランザクションで確定する。
 
 ## 1. 目的
 
@@ -31,6 +32,12 @@
   - schemaはversion付き、破壊変更は明示的移行を必須にする。
 
 ## 3. モジュール一覧と境界
+
+実装形態の補足（Critical対応）:
+
+- 論理境界は7モジュールを維持する。
+- MVPの物理デプロイは `Control Kernel`（Task + Runtime Supervisor + Mailbox Relay）を1プロセスに集約してよい。
+- 目的は「状態遷移 + event + outbox」の同一Tx境界を先に成立させること。
 
 ## 3.1 Workflow Module
 
@@ -113,6 +120,7 @@
 
 - envelope schema 検証
 - inbox/outbox 配送
+- at-least-once 配送と重複排除（consumer側）
 - unicast / fan-out 実行
 
 所有データ:
@@ -125,6 +133,7 @@
 - `Publish(message) -> MessageId`
 - `Consume(agent_id, max_n) -> Message[]`
 - `Ack(agent_id, msg_id) -> OK`
+- `Nack(agent_id, msg_id, reason) -> OK`
 - `Fanout(topic_or_team, message) -> MessageId[]`
 
 非責務:
@@ -139,6 +148,7 @@
 - worker heartbeat監視
 - crash検知と再起動
 - lease timeout 回収トリガ
+- outbox relay（state store から mailbox への配送）
 
 所有データ:
 
@@ -151,6 +161,7 @@
 - `UpdateHeartbeat(worker_id, ts) -> OK`
 - `DetectStaleWorkers(now) -> WorkerId[]`
 - `RecoverWorker(worker_id) -> RecoveryResult`
+- `RelayOutbox(limit) -> DeliveredCount`
 
 非責務:
 
@@ -183,6 +194,7 @@
 
 - トランザクション
 - event log 永続化
+- outbox 永続化
 - projection 更新
 
 所有データ:
@@ -220,6 +232,7 @@
 
 - Task完了通知は `TaskCompleted` イベントを正とし、Mailbox送信は Runtime/Worker 側で行う。
 - Task module は配送先や送信タイミングを知らない（配送責務を持たない）。
+- Runtime/Worker は task state を直接更新せず、state store の outbox relay のみを担当する。
 
 ## 5. 契約（Interface Contracts）
 
@@ -231,9 +244,11 @@
 
 ```json
 {
+  "schema_version": 1,
   "worker_id": "worker-backend-1",
   "capabilities": ["backend", "typescript"],
   "filters": {"stage": "impl"},
+  "idempotency_key": "claim-worker-backend-1-20260211-001",
   "request_id": "req-uuid"
 }
 ```
@@ -263,6 +278,7 @@
 ```json
 {
   "event_id": "evt-uuid",
+  "schema_version": 1,
   "event_type": "TaskClaimed",
   "event_version": 1,
   "occurred_at": "2026-02-11T15:00:00Z",
@@ -291,15 +307,36 @@
   "msg_id": "msg-uuid",
   "schema_version": 1,
   "task_id": "task-123",
+  "sender_id": "reviewer-1",
+  "sender_instance_id": "worker-reviewer-1",
+  "key_id": "k-reviewer-1-v1",
+  "issued_at": "2026-02-11T15:01:00Z",
+  "nonce": "nonce-uuid",
+  "signature": "base64-signature",
   "from": "reviewer-1",
   "to": "coder-1",
   "type": "review_result",
   "state_version": 12,
   "parent_id": "msg-prev",
+  "delivery_attempt": 1,
   "payload": {
+    "task_id": "task-123",
+    "model": "gpt-5-codex",
     "verdict": "FAIL",
-    "blocking": ["missing test"],
-    "non_blocking": []
+    "blocking": [
+      {
+        "code": "TEST_MISSING",
+        "title": "Regression test missing",
+        "detail": "required case is not covered",
+        "severity": "high"
+      }
+    ],
+    "non_blocking": [],
+    "summary": "missing regression test",
+    "confidence": "high",
+    "next_action": "rework",
+    "generated_at": "2026-02-11T15:01:00Z",
+    "raw_output_ref": "artifact://task-123/review/codex/1"
   }
 }
 ```
@@ -309,7 +346,15 @@
 - `schema_version` 必須
 - `task_id` 必須
 - `msg_id` は全体で一意
-- 未知フィールドは読み飛ばし（forward compatibility）
+- `sender_id` / `sender_instance_id` / `key_id` / `issued_at` / `nonce` / `signature` は必須
+- `from` は `sender_id` と一致させる（不一致は隔離）
+- ACL主体は envelope `sender_id` に固定する（payload内主体は信頼しない）
+- `review_result` / `aggregation_result` は `envelope.task_id == payload.task_id` を必須検証し、不一致は隔離する
+- `state_version` は task 単位で単調増加（欠番時は `resync-required`）
+- 配送保証は at-least-once（consumer は `msg_id` で重複排除）
+- `review_result` は receipt 永続化成功時に ack し、duplicate は `no-op + ack` とする
+- `issued_at` の許容窓と `nonce` 再利用禁止でリプレイ攻撃を拒否
+- PoC v1 の canonical schema では未知フィールドを拒否（`additionalProperties: false`）
 
 ## 5.4 TypeScript インターフェース例（実装契約）
 
@@ -334,6 +379,7 @@ export interface MailboxModule {
   publish(input: PublishMessageCommand): Promise<string>;
   consume(input: ConsumeMessagesQuery): Promise<MessageEnvelope[]>;
   ack(input: AckMessageCommand): Promise<void>;
+  nack(input: NackMessageCommand): Promise<void>;
   fanout(input: FanoutCommand): Promise<string[]>;
 }
 ```
@@ -378,18 +424,65 @@ MVP例外:
 - 既存実装都合で直接更新が必要な場合でも、同一トランザクションで対応イベントを必ず追記する。
 - 例外は期限付きとし、event-first へ移行するタスクを backlog 化する。
 
+## 5.7 配送保証契約（Mailbox + State Store）
+
+基本方針:
+
+- 配送保証は `at-least-once` とする。
+- task 状態遷移、対応イベント追記、outbox 追加は同一トランザクションで実行する。
+- outbox relay は Runtime/Worker が担当し、配送成功後に outbox を ack する。
+
+順序/重複:
+
+- 順序保証スコープは `task_id` 単位（`state_version` 単調増加）。
+- consumer は `msg_id` の一意制約で重複受信を無害化する。
+- visibility timeout 超過時は再配送し、`delivery_attempt` を加算する。
+- 重複排除キー `task_id + agent_id + msg_id` は durable store に保存し、runtime 再起動後も有効であること。
+- PoC v1 の重複排除レコード保持は `state_root` ライフサイクルに従う（TTL自動削除は実装しない）。
+
+障害時:
+
+- relay 中断時は outbox 未ack レコードを再送対象にする。
+- `dead-letter` へ移送する閾値（attempt 上限）を設定する。
+
+## 5.8 セキュリティ契約（認証/改ざん対策）
+
+認証:
+
+- 送信者は `sender_id` と `sender_instance_id` を必須とする。
+- envelope は署名付き（`signature`）とし、Runtime が検証できないメッセージは拒否する。
+
+認可:
+
+- `type` ごとに publish 可能ロールを固定（ACL）。
+- worker は自ロールに許可された `type` のみ publish 可能。
+
+改ざん/汚染対策:
+
+- `nonce` と `issued_at` を利用して replay を拒否する。
+- 署名対象は canonical JSON（`json_c14n_v1`）で正規化する。
+- payload 自由文を制御命令として直接実行しない。
+- 状態遷移入力は構造化フィールドのみ採用する。
+
 ## 6. 互換性ポリシー
 
-- Minor変更
-  - optional field 追加のみ許可
-- Major変更
-  - required field 変更、意味変更、削除
-  - migration plan と dual-read 期間を必須化
+PoC v1（strict）:
+
+- フィールド追加（optional 含む）はすべて major 扱い
+- required field 変更、意味変更、削除は major 扱い
+- major 変更時は migration plan と dual-read 期間を必須化
+
+v2 以降（拡張モード）:
+
+- optional field 追加を minor として許可可能
+- ただし署名対象フィールドと検証ルール変更は major とする
 
 バージョン戦略:
 
 - `schema_version` を envelope/event/command それぞれに持つ
 - adapter で old/new 変換を許容
+- 署名対象フィールド変更は major 変更として扱う
+- PoC v1 の canonical schema は strict（未知フィールド追加は major 扱い）
 
 ## 7. 疎結合を守る開発ルール
 
@@ -399,15 +492,22 @@ MVP例外:
 - Rule-04: retryは idempotent key 前提
 - Rule-05: broadcast は orchestratorのみ
 - Rule-06: hooksは gateway adapter からのみ接続
+- Rule-07: state遷移と通知の分断更新禁止（必ず outbox 同一Tx）
+- Rule-08: 認証失敗/ACL違反メッセージは処理せず隔離
 
 ## 8. テスト戦略（契約中心）
 
 - Contract Test
   - command/event/envelope schema を固定テスト
 - Compatibility Test
-  - N-1 schema reader で N writer を読めること
+  - PoC v1: strict schema（未知フィールド拒否）を固定し、N writer は N schema のみを対象とする
+  - v2以降: optional field 追加時に N-1 reader 互換（adapter経由）を検証する
+- Delivery Test
+  - 状態遷移成功直後に crash しても outbox relay で通知が欠落しないこと
 - Concurrency Test
   - 同時 claim / 同時 reservation 競合試験
+- Security Test
+  - 署名不正 / nonce再利用 / ACL違反を拒否できること
 - Recovery Test
   - worker crash -> lease失効 -> requeue を再現
 - End-to-End Test
