@@ -1,0 +1,27 @@
+{
+  "orchestrator_id": "orchestrator",
+  "aggregator_id": "aggregator",
+  "reviewers": [
+    {
+      "id": "codex-security-reviewer",
+      "provider": "codex",
+      "model": "gpt-5.3-codex",
+      "instruction": "Focus on security risks, auth flaws, injection vectors, and secret handling.",
+      "display_name": "Codex Security Reviewer"
+    },
+    {
+      "id": "claude-performance-reviewer",
+      "provider": "claude",
+      "model": "claude-sonnet-4-5-20250929",
+      "instruction": "Focus on performance bottlenecks, memory pressure, and concurrency behavior.",
+      "display_name": "Claude Performance Reviewer"
+    },
+    {
+      "id": "codex-architecture-reviewer",
+      "provider": "codex",
+      "model": "gpt-5.3-codex",
+      "instruction": "Focus on module boundaries, adapter contracts, and long-term maintainability.",
+      "display_name": "Codex Architecture Reviewer"
+    }
+  ]
+}

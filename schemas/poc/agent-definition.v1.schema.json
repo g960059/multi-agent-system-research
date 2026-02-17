@@ -17,6 +17,15 @@
       "items": {
         "$ref": "#/$defs/agent"
       }
+    },
+    "env_profiles": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9_-]{1,63}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/envMap"
+      }
     }
   },
   "required": [
@@ -115,6 +124,13 @@
           "type": "string",
           "enum": [
             "reviewer",
+            "coder",
+            "frontend_coder",
+            "backend_coder",
+            "qa_tester",
+            "documenter",
+            "researcher",
+            "architect",
             "aggregator",
             "orchestrator"
           ]
@@ -131,9 +147,17 @@
           "type": "string",
           "minLength": 1
         },
+        "instruction": {
+          "type": "string",
+          "minLength": 1
+        },
         "prompt_file": {
           "type": "string",
           "minLength": 1
+        },
+        "env_profile": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{1,63}$"
         },
         "input_schema_ref": {
           "type": "string",
@@ -192,13 +216,8 @@
       },
       "required": [
         "id",
-        "name",
         "role",
-        "provider",
-        "model",
-        "prompt_file",
-        "allowed_message_types",
-        "command_template"
+        "provider"
       ]
     }
   }

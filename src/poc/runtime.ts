@@ -3,9 +3,18 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as cp from "node:child_process";
+import { buildAcl, buildRuntimeAgentConfig, type ReviewerAgentProfile } from "./modules/agent-adapter";
+import {
+  signatureForEnvelope,
+  validateEnvelope as validateEnvelopeWithPolicy
+} from "./modules/envelope-policy";
+import { FileMailbox, type ConsumedMessage } from "./modules/file-mailbox";
+import { FileStateStore } from "./modules/file-state-store";
 
-const REVIEWERS = ["codex", "claude"];
-const PRINCIPALS = ["orchestrator", "codex", "claude", "aggregator"];
+const DEFAULT_REVIEWER_PROMPT_FILES = {
+  codex: "prompts/reviewer/codex.md",
+  claude: "prompts/reviewer/claude.md"
+};
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -17,14 +26,6 @@ function ensureDir(dirPath: string): void {
 
 function readJson(filePath: string): any {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
-}
-
-function writeJson(filePath: string, value: any): void {
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-}
-
-function appendJsonl(filePath: string, value: any): void {
-  fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`, "utf8");
 }
 
 function truncateText(text: string, maxChars: number): string {
@@ -62,74 +63,39 @@ function runCommand(
   };
 }
 
-function stableStringify(value: any): string {
-  if (value === null || typeof value !== "object") {
-    if (value === undefined) {
-      return "";
-    }
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((x) => (x === undefined ? "null" : stableStringify(x))).join(",")}]`;
-  }
-  const keys = Object.keys(value)
-    .filter((k) => value[k] !== undefined)
-    .sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
-}
-
-function signatureForEnvelope(envelope: any): string {
-  const target = { ...envelope, signature: "" };
-  const canonical = stableStringify(target);
-  return crypto.createHash("sha256").update(canonical).digest("hex");
-}
-
-function senderAllowedByType(type: string, senderId: string): boolean {
-  if (type === "task_assignment") {
-    return senderId === "orchestrator";
-  }
-  if (type === "review_result") {
-    return senderId === "codex" || senderId === "claude";
-  }
-  if (type === "aggregation_result") {
-    return senderId === "aggregator";
-  }
-  if (type === "control") {
-    return senderId === "orchestrator";
-  }
-  if (type === "error") {
-    return PRINCIPALS.includes(senderId);
-  }
-  return false;
-}
-
 export function validateEnvelope(
   envelope: any,
   options: {
     requireTaskIdMatch: boolean;
     taskIdMatchTypes: string[];
+    acl?: {
+      task_assignment: string[];
+      review_result: string[];
+      aggregation_result: string[];
+      control: string[];
+      error: string[];
+    };
+    aggregationResultTarget?: string;
   }
 ): { ok: boolean; code?: string; message?: string } {
-  if (envelope.from !== envelope.sender_id) {
-    return { ok: false, code: "SENDER_ID_MISMATCH", message: "from must equal sender_id" };
-  }
-  if (!senderAllowedByType(envelope.type, envelope.sender_id)) {
-    return { ok: false, code: "ACL_DENY", message: `sender ${envelope.sender_id} cannot publish ${envelope.type}` };
-  }
-  if (envelope.type === "aggregation_result" && envelope.to !== "orchestrator") {
-    return { ok: false, code: "INVALID_ROUTE", message: "aggregation_result must target orchestrator" };
-  }
-  const expectedSignature = signatureForEnvelope(envelope);
-  if (envelope.signature !== expectedSignature) {
-    return { ok: false, code: "SIGNATURE_INVALID", message: "signature verification failed" };
-  }
-  if (options.requireTaskIdMatch && options.taskIdMatchTypes.includes(envelope.type)) {
-    const payloadTaskId = envelope?.payload?.task_id;
-    if (payloadTaskId !== envelope.task_id) {
-      return { ok: false, code: "TASK_ID_MISMATCH", message: "envelope.task_id must equal payload.task_id" };
-    }
-  }
-  return { ok: true };
+  const acl =
+    options?.acl ??
+    buildAcl(
+      buildRuntimeAgentConfig({
+        reviewers: [
+          { id: "codex", provider: "codex" },
+          { id: "claude", provider: "claude" }
+        ],
+        orchestratorId: "orchestrator",
+        aggregatorId: "aggregator"
+      })
+    );
+  return validateEnvelopeWithPolicy(envelope, {
+    requireTaskIdMatch: options.requireTaskIdMatch,
+    taskIdMatchTypes: options.taskIdMatchTypes,
+    acl,
+    aggregationResultTarget: options?.aggregationResultTarget ?? "orchestrator"
+  });
 }
 
 function parseJsonLenient(text: string): any {
@@ -166,18 +132,39 @@ function parseJsonLenient(text: string): any {
   throw new Error("no JSON object found");
 }
 
-function toFindingArray(value: any): any[] {
+function toFindingArray(value: any, fieldName: string): any[] {
   if (!Array.isArray(value)) {
-    return [];
+    throw new Error(`${fieldName} must be an array`);
   }
   return value.map((item, index) => {
-    const severity = ["critical", "high", "medium", "low"].includes(item?.severity) ? item.severity : "medium";
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`${fieldName}[${index}] must be an object`);
+    }
+    const code = String(item.code ?? "").trim();
+    const title = String(item.title ?? "").trim();
+    const detail = String(item.detail ?? "").trim();
+    const severity = String(item.severity ?? "").trim();
+    if (!code) {
+      throw new Error(`${fieldName}[${index}].code is required`);
+    }
+    if (!title) {
+      throw new Error(`${fieldName}[${index}].title is required`);
+    }
+    if (!detail) {
+      throw new Error(`${fieldName}[${index}].detail is required`);
+    }
+    if (!["critical", "high", "medium", "low"].includes(severity)) {
+      throw new Error(`${fieldName}[${index}].severity must be one of critical/high/medium/low`);
+    }
+    if (item.line !== undefined && (!Number.isInteger(item.line) || item.line <= 0)) {
+      throw new Error(`${fieldName}[${index}].line must be a positive integer when provided`);
+    }
     return {
-      code: String(item?.code ?? `AUTO_${index + 1}`),
-      title: String(item?.title ?? "Auto normalized finding"),
-      detail: String(item?.detail ?? "No detail provided by reviewer output"),
-      file_path: typeof item?.file_path === "string" ? item.file_path : undefined,
-      line: Number.isInteger(item?.line) && item.line > 0 ? item.line : undefined,
+      code,
+      title,
+      detail,
+      file_path: typeof item.file_path === "string" ? item.file_path : undefined,
+      line: Number.isInteger(item.line) && item.line > 0 ? item.line : undefined,
       severity
     };
   });
@@ -209,270 +196,39 @@ function classifyReviewerFailure(text: string): ReviewerFailureCode {
   return "REVIEWER_EXECUTION_ERROR";
 }
 
-type ConsumedMessage = {
-  agentId: string;
-  filePath: string;
-  envelope: any;
-};
-
-export class FileMailbox {
-  private readonly rootDir: string;
-
-  constructor(rootDir: string) {
-    this.rootDir = rootDir;
-  }
-
-  init(agents: string[]): void {
-    ensureDir(this.rootDir);
-    ensureDir(path.join(this.rootDir, "inbox"));
-    ensureDir(path.join(this.rootDir, "ack"));
-    ensureDir(path.join(this.rootDir, "deadletter"));
-    for (const agent of agents) {
-      ensureDir(path.join(this.rootDir, "inbox", agent));
-      ensureDir(path.join(this.rootDir, "ack", agent));
-      ensureDir(path.join(this.rootDir, "deadletter", agent));
-    }
-  }
-
-  publish(envelope: any): string {
-    const inboxDir = path.join(this.rootDir, "inbox", envelope.to);
-    ensureDir(inboxDir);
-    const fileName = `${envelope.msg_id}--${Date.now()}--${crypto.randomUUID()}.json`;
-    const filePath = path.join(inboxDir, fileName);
-    writeJson(filePath, envelope);
-    return filePath;
-  }
-
-  consume(agentId: string, limit: number): ConsumedMessage[] {
-    const inboxDir = path.join(this.rootDir, "inbox", agentId);
-    ensureDir(inboxDir);
-    const files = fs
-      .readdirSync(inboxDir)
-      .filter((name) => name.endsWith(".json"))
-      .sort()
-      .slice(0, limit);
-    return files.map((name) => {
-      const filePath = path.join(inboxDir, name);
-      return {
-        agentId,
-        filePath,
-        envelope: readJson(filePath)
-      };
-    });
-  }
-
-  peek(agentId: string): ConsumedMessage[] {
-    return this.consume(agentId, Number.MAX_SAFE_INTEGER);
-  }
-
-  ack(item: ConsumedMessage): void {
-    const dstDir = path.join(this.rootDir, "ack", item.agentId);
-    ensureDir(dstDir);
-    const dstPath = path.join(dstDir, path.basename(item.filePath));
-    fs.renameSync(item.filePath, dstPath);
-  }
-
-  nack(item: ConsumedMessage, reason: string): void {
-    const dstDir = path.join(this.rootDir, "deadletter", item.agentId);
-    ensureDir(dstDir);
-    const dstPath = path.join(dstDir, path.basename(item.filePath));
-    const wrapped = {
-      reason,
-      quarantined_at: nowIso(),
-      envelope: item.envelope
-    };
-    writeJson(dstPath, wrapped);
-    fs.unlinkSync(item.filePath);
-  }
-
-  deadletterCount(agentId: string): number {
-    const dir = path.join(this.rootDir, "deadletter", agentId);
-    if (!fs.existsSync(dir)) {
-      return 0;
-    }
-    return fs.readdirSync(dir).filter((x) => x.endsWith(".json")).length;
-  }
-}
-
-export class FileStateStore {
-  private readonly rootDir: string;
-  private readonly receiptsPath: string;
-  private readonly quarantinePath: string;
-  private readonly taskStatePath: string;
-  private readonly reviewCachePath: string;
-  private readonly receipts: Set<string> = new Set();
-  private taskState: Record<string, any> = {};
-  private reviewCache: Record<string, any> = {};
-
-  constructor(rootDir: string) {
-    this.rootDir = rootDir;
-    this.receiptsPath = path.join(rootDir, "message-receipts.jsonl");
-    this.quarantinePath = path.join(rootDir, "quarantine.jsonl");
-    this.taskStatePath = path.join(rootDir, "task-state.json");
-    this.reviewCachePath = path.join(rootDir, "review-cache.json");
-  }
-
-  init(): void {
-    ensureDir(this.rootDir);
-    for (const filePath of [this.receiptsPath, this.quarantinePath]) {
-      if (!fs.existsSync(filePath)) {
-        fs.writeFileSync(filePath, "", "utf8");
-      }
-    }
-    if (!fs.existsSync(this.taskStatePath)) {
-      writeJson(this.taskStatePath, {});
-    }
-    if (!fs.existsSync(this.reviewCachePath)) {
-      writeJson(this.reviewCachePath, {});
-    }
-    const receiptLines = fs.readFileSync(this.receiptsPath, "utf8").trim().split("\n").filter(Boolean);
-    for (const line of receiptLines) {
-      const row = JSON.parse(line);
-      this.receipts.add(this.receiptKey(row.task_id, row.agent_id, row.msg_id));
-    }
-    this.taskState = readJson(this.taskStatePath);
-    this.reviewCache = readJson(this.reviewCachePath);
-  }
-
-  private receiptKey(taskId: string, agentId: string, msgId: string): string {
-    return `${taskId}|${agentId}|${msgId}`;
-  }
-
-  insertReceipt(taskId: string, agentId: string, msgId: string, type: string): boolean {
-    const key = this.receiptKey(taskId, agentId, msgId);
-    if (this.receipts.has(key)) {
-      return false;
-    }
-    this.receipts.add(key);
-    appendJsonl(this.receiptsPath, {
-      task_id: taskId,
-      agent_id: agentId,
-      msg_id: msgId,
-      message_type: type,
-      processed_at: nowIso()
-    });
-    return true;
-  }
-
-  receiptCount(): number {
-    return this.receipts.size;
-  }
-
-  appendQuarantine(row: any): void {
-    appendJsonl(this.quarantinePath, {
-      ...row,
-      quarantined_at: nowIso()
-    });
-  }
-
-  readQuarantineRows(): any[] {
-    const lines = fs.readFileSync(this.quarantinePath, "utf8").trim().split("\n").filter(Boolean);
-    return lines.map((line) => JSON.parse(line));
-  }
-
-  recordReview(taskId: string, reviewerId: string, payload: any, msgId: string): void {
-    if (!this.reviewCache[taskId]) {
-      this.reviewCache[taskId] = {};
-    }
-    const reviewerFailureCodes = Array.isArray(payload?.blocking)
-      ? payload.blocking
-          .map((finding: any) => String(finding?.code ?? ""))
-          .filter((code: string) => /^REVIEWER_.*_ERROR$/.test(code))
-      : [];
-    const hasExecutionError = reviewerFailureCodes.length > 0;
-    this.reviewCache[taskId][reviewerId] = {
-      msg_id: msgId,
-      verdict: payload.verdict,
-      blocking_count: Array.isArray(payload.blocking) ? payload.blocking.length : Number(payload.blocking_count ?? 0),
-      next_action: payload.next_action,
-      has_execution_error: hasExecutionError,
-      reviewer_failure_codes: reviewerFailureCodes
-    };
-    writeJson(this.reviewCachePath, this.reviewCache);
-  }
-
-  getReviews(taskId: string): Record<string, any> {
-    return this.reviewCache[taskId] ?? {};
-  }
-
-  getReviewerFailureCounts(taskId: string): {
-    auth_error: number;
-    network_error: number;
-    execution_error: number;
-    total: number;
-  } {
-    const rows = Object.values(this.getReviews(taskId) ?? {});
-    const counts = {
-      auth_error: 0,
-      network_error: 0,
-      execution_error: 0,
-      total: 0
-    };
-    for (const row of rows) {
-      const codes = Array.isArray((row as any)?.reviewer_failure_codes) ? (row as any).reviewer_failure_codes : [];
-      for (const code of codes) {
-        if (code === "REVIEWER_AUTH_ERROR") {
-          counts.auth_error += 1;
-          counts.total += 1;
-          continue;
-        }
-        if (code === "REVIEWER_NETWORK_ERROR") {
-          counts.network_error += 1;
-          counts.total += 1;
-          continue;
-        }
-        if (code === "REVIEWER_EXECUTION_ERROR") {
-          counts.execution_error += 1;
-          counts.total += 1;
-        }
-      }
-    }
-    return counts;
-  }
-
-  canPublishAggregation(taskId: string): boolean {
-    const row = this.taskState[taskId] ?? {};
-    return !row.aggregation_published_msg_id;
-  }
-
-  markAggregationPublished(taskId: string, msgId: string): void {
-    const row = this.taskState[taskId] ?? {};
-    row.aggregation_published_msg_id = msgId;
-    row.updated_at = nowIso();
-    this.taskState[taskId] = row;
-    writeJson(this.taskStatePath, this.taskState);
-  }
-
-  setFinalDecision(taskId: string, decision: any): void {
-    const row = this.taskState[taskId] ?? {};
-    row.final_decision = decision;
-    row.updated_at = nowIso();
-    this.taskState[taskId] = row;
-    writeJson(this.taskStatePath, this.taskState);
-  }
-
-  getFinalDecision(taskId: string): any | null {
-    return this.taskState?.[taskId]?.final_decision ?? null;
-  }
-}
-
 export class PocRuntime {
   readonly mailbox: FileMailbox;
   readonly state: FileStateStore;
   readonly stateRoot: string;
+  readonly orchestratorId: string;
+  readonly aggregatorId: string;
+  readonly reviewerProfiles: ReviewerAgentProfile[];
+  readonly reviewerProfileById: Record<string, ReviewerAgentProfile>;
+  readonly principalIds: string[];
   readonly requiredAgents: string[];
-  readonly validationOptions: { requireTaskIdMatch: boolean; taskIdMatchTypes: string[] };
+  readonly validationOptions: {
+    requireTaskIdMatch: boolean;
+    taskIdMatchTypes: string[];
+    acl: {
+      task_assignment: string[];
+      review_result: string[];
+      aggregation_result: string[];
+      control: string[];
+      error: string[];
+    };
+    aggregationResultTarget: string;
+  };
   readonly reviewerMode: "deterministic" | "cli";
   readonly cliTimeoutMs: number;
   readonly repoRoot: string;
-  readonly promptByReviewer: Record<"codex" | "claude", string>;
+  readonly promptByProvider: Record<"codex" | "claude", string>;
+  readonly promptByReviewerId: Record<string, string>;
   readonly rawOutputDir: string;
   readonly cliHomeDir: string;
   readonly artifactDir: string;
   readonly reviewSchemaPath: string;
   readonly codexOutputSchemaPath: string;
   readonly reviewSchemaJson: string;
-  readonly reviewerModelById: Record<"codex" | "claude", string | undefined>;
   readonly reviewInputMaxChars: number;
   readonly reviewInputExcerptChars: number;
   readonly reviewInputIncludeDiff: boolean;
@@ -489,6 +245,9 @@ export class PocRuntime {
     repoRoot?: string;
     codexModel?: string;
     claudeModel?: string;
+    reviewers?: ReviewerAgentProfile[];
+    orchestratorId?: string;
+    aggregatorId?: string;
     reviewInputMaxChars?: number;
     reviewInputExcerptChars?: number;
     reviewInputIncludeDiff?: boolean;
@@ -500,10 +259,33 @@ export class PocRuntime {
     this.mailbox = new FileMailbox(mailboxRoot);
     this.state = new FileStateStore(stateRoot);
     this.stateRoot = stateRoot;
-    this.requiredAgents = options?.requiredAgents ?? [...REVIEWERS];
+    const agentConfig = buildRuntimeAgentConfig({
+      orchestratorId: options?.orchestratorId,
+      aggregatorId: options?.aggregatorId,
+      reviewers: options?.reviewers,
+      codexModel: options?.codexModel,
+      claudeModel: options?.claudeModel
+    });
+    this.orchestratorId = agentConfig.orchestrator_id;
+    this.aggregatorId = agentConfig.aggregator_id;
+    this.reviewerProfiles = [...agentConfig.reviewers];
+    this.reviewerProfileById = {};
+    for (const reviewer of this.reviewerProfiles) {
+      this.reviewerProfileById[reviewer.id] = reviewer;
+    }
+    this.principalIds = [this.orchestratorId, this.aggregatorId, ...this.reviewerProfiles.map((x) => x.id)];
+    this.requiredAgents = options?.requiredAgents ?? this.reviewerProfiles.map((x) => x.id);
+    for (const agentId of this.requiredAgents) {
+      if (!this.reviewerProfileById[agentId]) {
+        throw new Error(`requiredAgents contains unknown reviewer id: ${agentId}`);
+      }
+    }
+    const acl = buildAcl(agentConfig);
     this.validationOptions = {
       requireTaskIdMatch: options?.requireTaskIdMatch ?? true,
-      taskIdMatchTypes: options?.taskIdMatchTypes ?? ["review_result", "aggregation_result"]
+      taskIdMatchTypes: options?.taskIdMatchTypes ?? ["review_result", "aggregation_result"],
+      acl,
+      aggregationResultTarget: this.orchestratorId
     };
     this.reviewerMode = options?.reviewerMode ?? "deterministic";
     this.cliTimeoutMs = options?.cliTimeoutMs ?? 120000;
@@ -511,25 +293,29 @@ export class PocRuntime {
     this.reviewSchemaPath = path.resolve(repoRoot, "schemas/poc/review-result.v1.schema.json");
     this.codexOutputSchemaPath = path.resolve(repoRoot, "schemas/poc/review-result.v1.codex-output.schema.json");
     this.reviewSchemaJson = JSON.stringify(readJson(this.reviewSchemaPath));
-    this.reviewerModelById = {
-      codex: options?.codexModel?.trim() ? options.codexModel.trim() : undefined,
-      claude: options?.claudeModel?.trim() ? options.claudeModel.trim() : undefined
-    };
     this.reviewInputMaxChars = Math.max(20000, Number(options?.reviewInputMaxChars ?? 120000));
     this.reviewInputExcerptChars = Math.max(4000, Number(options?.reviewInputExcerptChars ?? 24000));
     this.reviewInputIncludeDiff = options?.reviewInputIncludeDiff ?? false;
     this.cliHomeMode = options?.cliHomeMode ?? "isolated";
-    this.promptByReviewer = {
-      codex: fs.readFileSync(path.resolve(repoRoot, "prompts/reviewer/codex.md"), "utf8"),
-      claude: fs.readFileSync(path.resolve(repoRoot, "prompts/reviewer/claude.md"), "utf8")
+    this.promptByProvider = {
+      codex: fs.readFileSync(path.resolve(repoRoot, DEFAULT_REVIEWER_PROMPT_FILES.codex), "utf8"),
+      claude: fs.readFileSync(path.resolve(repoRoot, DEFAULT_REVIEWER_PROMPT_FILES.claude), "utf8")
     };
+    this.promptByReviewerId = {};
+    for (const reviewer of this.reviewerProfiles) {
+      if (reviewer.prompt_file) {
+        this.promptByReviewerId[reviewer.id] = fs.readFileSync(path.resolve(repoRoot, reviewer.prompt_file), "utf8");
+        continue;
+      }
+      this.promptByReviewerId[reviewer.id] = this.promptByProvider[reviewer.provider];
+    }
     this.rawOutputDir = path.join(stateRoot, "raw-cli-output");
     this.cliHomeDir = path.join(stateRoot, "cli-home");
     this.artifactDir = path.join(stateRoot, "artifacts");
   }
 
   init(): void {
-    this.mailbox.init(["codex", "claude", "aggregator", "orchestrator"]);
+    this.mailbox.init(this.principalIds);
     this.state.init();
     ensureDir(this.rawOutputDir);
     ensureDir(this.cliHomeDir);
@@ -663,20 +449,30 @@ export class PocRuntime {
   seedTask(taskId: string, instruction: string): string[] {
     const reviewInput = this.captureReviewInput(taskId, instruction);
     const msgIds: string[] = [];
-    for (const reviewerId of REVIEWERS) {
+    for (const reviewer of this.reviewerProfiles) {
+      const reviewerInstruction = reviewer.instruction
+        ? `${instruction}\n\nReviewer focus (${reviewer.id}): ${reviewer.instruction}`
+        : instruction;
       const assignmentPayload = {
         review_request_ref: `artifact://${taskId}/review-request.md`,
         review_input_ref: reviewInput.reviewInputRef,
         review_input_source: reviewInput.reviewInputSource,
         review_input_excerpt: reviewInput.reviewInputExcerpt,
-        reviewer_model_hint: this.reviewerModelById[reviewerId],
+        reviewer_model_hint: reviewer.model,
+        reviewer_profile: {
+          id: reviewer.id,
+          provider: reviewer.provider,
+          model: reviewer.model ?? null,
+          instruction: reviewer.instruction ?? null,
+          display_name: reviewer.display_name ?? null
+        },
         required_agents: [...this.requiredAgents],
-        instruction
+        instruction: reviewerInstruction
       };
       const envelope = this.createEnvelope({
         taskId,
-        senderId: "orchestrator",
-        to: reviewerId,
+        senderId: this.orchestratorId,
+        to: reviewer.id,
         type: "task_assignment",
         payload: assignmentPayload,
         stateVersion: 1
@@ -699,14 +495,14 @@ export class PocRuntime {
     this.mailbox.nack(item, validation.code ?? "VALIDATION_FAILED");
   }
 
-  private writeRawCliOutput(taskId: string, reviewerId: "codex" | "claude", text: string): string {
+  private writeRawCliOutput(taskId: string, reviewerId: string, text: string): string {
     const filePath = path.join(this.rawOutputDir, `${taskId}--${reviewerId}--${Date.now()}.txt`);
     fs.writeFileSync(filePath, text, "utf8");
     return filePath;
   }
 
-  private buildReviewerPrompt(reviewerId: "codex" | "claude", assignmentEnvelope: any): string {
-    const basePrompt = this.promptByReviewer[reviewerId];
+  private buildReviewerPrompt(reviewer: ReviewerAgentProfile, assignmentEnvelope: any): string {
+    const basePrompt = this.promptByReviewerId[reviewer.id] ?? this.promptByProvider[reviewer.provider];
     const instruction = String(assignmentEnvelope?.payload?.instruction ?? "");
     const taskId = String(assignmentEnvelope?.task_id ?? "");
     const reviewInputRef = String(assignmentEnvelope?.payload?.review_input_ref ?? "");
@@ -721,6 +517,9 @@ export class PocRuntime {
       "- Keep schema_version=1 and include all required fields.",
       `- Set task_id exactly to "${taskId}".`,
       "- Do not execute shell commands or any external tools.",
+      `- reviewer_id: ${reviewer.id}`,
+      `- provider: ${reviewer.provider}`,
+      `- model_hint: ${reviewer.model ?? "(none)"}`,
       "",
       "Assignment:",
       instruction,
@@ -736,39 +535,83 @@ export class PocRuntime {
     ].join("\n");
   }
 
-  private buildCliEnv(): NodeJS.ProcessEnv {
-    if (this.cliHomeMode === "host") {
-      return { ...process.env };
-    }
-    const xdgConfig = path.join(this.cliHomeDir, ".config");
-    const xdgCache = path.join(this.cliHomeDir, ".cache");
-    const xdgState = path.join(this.cliHomeDir, ".state");
-    const xdgData = path.join(this.cliHomeDir, ".local", "share");
-    for (const dirPath of [xdgConfig, xdgCache, xdgState, xdgData, path.join(this.cliHomeDir, ".codex"), path.join(this.cliHomeDir, ".claude")]) {
-      ensureDir(dirPath);
+  private renderCommandTemplateToken(token: string, values: Record<string, string>): string {
+    return String(token ?? "").replace(/\{([a-z0-9_]+)\}/gi, (_, name: string) => values[name] ?? "");
+  }
+
+  private commandFromTemplate(
+    template: string[],
+    values: Record<string, string>
+  ): { cmd: string; args: string[]; includesPromptPlaceholder: boolean } {
+    const includesPromptPlaceholder = template.some((token) => String(token ?? "").includes("{prompt}"));
+    const resolved = template
+      .map((token) => this.renderCommandTemplateToken(token, values).trim())
+      .filter(Boolean);
+    if (resolved.length === 0) {
+      throw new Error("reviewer command_template resolved to empty command");
     }
     return {
-      ...process.env,
-      HOME: this.cliHomeDir,
-      XDG_CONFIG_HOME: xdgConfig,
-      XDG_CACHE_HOME: xdgCache,
-      XDG_STATE_HOME: xdgState,
-      XDG_DATA_HOME: xdgData
+      cmd: resolved[0],
+      args: resolved.slice(1),
+      includesPromptPlaceholder
     };
   }
 
-  private executeReviewerCli(
-    reviewerId: "codex" | "claude",
-    assignmentEnvelope: any
-  ): { payload: any; rawOutputRef: string } {
-    const prompt = this.buildReviewerPrompt(reviewerId, assignmentEnvelope);
-    const env = this.buildCliEnv();
-    let cmd = "";
-    let args: string[] = [];
+  private buildReviewerCommand(
+    reviewer: ReviewerAgentProfile,
+    prompt: string
+  ): { cmd: string; args: string[] } {
+    const values = {
+      repo_root: this.repoRoot,
+      prompt,
+      model: reviewer.model ?? "",
+      codex_output_schema_path: this.codexOutputSchemaPath,
+      review_schema_json: this.reviewSchemaJson
+    };
 
-    if (reviewerId === "codex") {
-      cmd = "codex";
-      args = [
+    if (Array.isArray(reviewer.command_template) && reviewer.command_template.length > 0) {
+      const fromTemplate = this.commandFromTemplate(reviewer.command_template, values);
+      let args = [...fromTemplate.args];
+      if (!fromTemplate.includesPromptPlaceholder) {
+        args.push(prompt);
+      }
+
+      const cmdBase = path.basename(fromTemplate.cmd).toLowerCase();
+      if (reviewer.provider === "codex" && cmdBase === "codex") {
+        if (!args.includes("--skip-git-repo-check")) {
+          args.push("--skip-git-repo-check");
+        }
+        if (!args.includes("--output-schema")) {
+          args.push("--output-schema", this.codexOutputSchemaPath);
+        }
+        if (reviewer.model && !args.includes("--model")) {
+          const execIndex = args.indexOf("exec");
+          if (execIndex === -1) {
+            args.push("--model", reviewer.model);
+          } else {
+            args.splice(execIndex + 1, 0, "--model", reviewer.model);
+          }
+        }
+      } else if (reviewer.provider === "claude" && cmdBase === "claude") {
+        if (!args.includes("--output-format")) {
+          args.push("--output-format", "json");
+        }
+        if (!args.includes("--json-schema")) {
+          args.push("--json-schema", this.reviewSchemaJson);
+        }
+        if (reviewer.model && !args.includes("--model")) {
+          args.push("--model", reviewer.model);
+        }
+      }
+
+      return {
+        cmd: fromTemplate.cmd,
+        args
+      };
+    }
+
+    if (reviewer.provider === "codex") {
+      const args = [
         "exec",
         "--sandbox",
         "read-only",
@@ -779,16 +622,58 @@ export class PocRuntime {
         this.codexOutputSchemaPath,
         prompt
       ];
-      if (this.reviewerModelById.codex) {
-        args.splice(1, 0, "--model", this.reviewerModelById.codex);
+      if (reviewer.model) {
+        args.splice(1, 0, "--model", reviewer.model);
       }
-    } else {
-      cmd = "claude";
-      args = ["-p", prompt, "--output-format", "json", "--json-schema", this.reviewSchemaJson];
-      if (this.reviewerModelById.claude) {
-        args.push("--model", this.reviewerModelById.claude);
-      }
+      return { cmd: "codex", args };
     }
+
+    const args = ["-p", prompt, "--output-format", "json", "--json-schema", this.reviewSchemaJson];
+    if (reviewer.model) {
+      args.push("--model", reviewer.model);
+    }
+    return { cmd: "claude", args };
+  }
+
+  private buildCliEnv(reviewer?: ReviewerAgentProfile): NodeJS.ProcessEnv {
+    const reviewerEnv =
+      reviewer?.env && typeof reviewer.env === "object"
+        ? Object.fromEntries(
+            Object.entries(reviewer.env)
+              .map(([k, v]) => [String(k ?? "").trim(), String(v ?? "")])
+              .filter(([k]) => Boolean(k))
+          )
+        : {};
+    if (this.cliHomeMode === "host") {
+      return { ...process.env, ...reviewerEnv };
+    }
+    const xdgConfig = path.join(this.cliHomeDir, ".config");
+    const xdgCache = path.join(this.cliHomeDir, ".cache");
+    const xdgState = path.join(this.cliHomeDir, ".state");
+    const xdgData = path.join(this.cliHomeDir, ".local", "share");
+    for (const dirPath of [xdgConfig, xdgCache, xdgState, xdgData, path.join(this.cliHomeDir, ".codex"), path.join(this.cliHomeDir, ".claude")]) {
+      ensureDir(dirPath);
+    }
+    return {
+      ...process.env,
+      ...reviewerEnv,
+      HOME: this.cliHomeDir,
+      XDG_CONFIG_HOME: xdgConfig,
+      XDG_CACHE_HOME: xdgCache,
+      XDG_STATE_HOME: xdgState,
+      XDG_DATA_HOME: xdgData
+    };
+  }
+
+  private executeReviewerCli(
+    reviewer: ReviewerAgentProfile,
+    assignmentEnvelope: any
+  ): { payload: any; rawOutputRef: string } {
+    const prompt = this.buildReviewerPrompt(reviewer, assignmentEnvelope);
+    const env = this.buildCliEnv(reviewer);
+    const reviewerCommand = this.buildReviewerCommand(reviewer, prompt);
+    const cmd = reviewerCommand.cmd;
+    const args = reviewerCommand.args;
 
     const run = cp.spawnSync(cmd, args, {
       cwd: this.repoRoot,
@@ -806,21 +691,21 @@ export class PocRuntime {
       "stderr:",
       String(run.stderr ?? "")
     ].join("\n");
-    const rawOutputRef = this.writeRawCliOutput(assignmentEnvelope.task_id, reviewerId, rawText);
+    const rawOutputRef = this.writeRawCliOutput(assignmentEnvelope.task_id, reviewer.id, rawText);
 
     if (run.error) {
-      const message = `${reviewerId} execution error: ${String(run.error.message ?? run.error)} (raw=${rawOutputRef})`;
+      const message = `${reviewer.id} execution error: ${String(run.error.message ?? run.error)} (raw=${rawOutputRef})`;
       throw new ReviewerCliError(classifyReviewerFailure(message), message, rawOutputRef);
     }
     if (typeof run.status === "number" && run.status !== 0) {
-      const message = `${reviewerId} exited with status=${run.status}\nstdout=${String(run.stdout ?? "")}\nstderr=${String(
+      const message = `${reviewer.id} exited with status=${run.status}\nstdout=${String(run.stdout ?? "")}\nstderr=${String(
         run.stderr ?? ""
       )}\nraw=${rawOutputRef}`;
       throw new ReviewerCliError(classifyReviewerFailure(message), message, rawOutputRef);
     }
 
     let parsed = parseJsonLenient(String(run.stdout ?? ""));
-    if (reviewerId === "claude" && parsed && typeof parsed === "object") {
+    if (reviewer.provider === "claude" && parsed && typeof parsed === "object") {
       if (typeof parsed.result === "string") {
         parsed = parseJsonLenient(parsed.result);
       } else if (Array.isArray(parsed.content)) {
@@ -834,40 +719,72 @@ export class PocRuntime {
   }
 
   private normalizeReviewPayload(
-    reviewerId: "codex" | "claude",
+    reviewer: ReviewerAgentProfile,
     taskId: string,
     payload: any,
     rawOutputRef: string
   ): any {
-    const defaultModel =
-      this.reviewerModelById[reviewerId] ?? (reviewerId === "codex" ? "gpt-5-codex" : "claude-sonnet");
-    const verdict = payload?.verdict === "FAIL" ? "FAIL" : "PASS";
-    const blocking = toFindingArray(payload?.blocking);
-    const nonBlocking = toFindingArray(payload?.non_blocking);
-    const confidence = ["high", "medium", "low"].includes(payload?.confidence) ? payload.confidence : "medium";
-    const nextAction =
-      ["proceed", "rework", "manual_review_required"].includes(payload?.next_action)
-        ? payload.next_action
-        : verdict === "FAIL"
-        ? "rework"
-        : "proceed";
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("reviewer output must be a JSON object");
+    }
+    const payloadTaskId = String(payload.task_id ?? "").trim();
+    if (!payloadTaskId) {
+      throw new Error("review payload.task_id is required");
+    }
+    if (payloadTaskId !== taskId) {
+      throw new Error(`review payload.task_id mismatch: expected=${taskId}, got=${payloadTaskId}`);
+    }
+    const model = String(payload.model ?? "").trim();
+    if (!model) {
+      throw new Error("review payload.model is required");
+    }
+    const verdict = String(payload.verdict ?? "").trim();
+    if (!["PASS", "FAIL"].includes(verdict)) {
+      throw new Error("review payload.verdict must be PASS or FAIL");
+    }
+    const blocking = toFindingArray(payload.blocking, "blocking");
+    const nonBlocking = toFindingArray(payload.non_blocking, "non_blocking");
+    const summary = String(payload.summary ?? "").trim();
+    if (!summary) {
+      throw new Error("review payload.summary is required");
+    }
+    const confidence = String(payload.confidence ?? "").trim();
+    if (!["high", "medium", "low"].includes(confidence)) {
+      throw new Error("review payload.confidence must be high/medium/low");
+    }
+    const nextAction = String(payload.next_action ?? "").trim();
+    if (!["proceed", "rework", "manual_review_required"].includes(nextAction)) {
+      throw new Error("review payload.next_action must be proceed/rework/manual_review_required");
+    }
+    const generatedAt = String(payload.generated_at ?? "").trim();
+    if (!generatedAt || Number.isNaN(new Date(generatedAt).getTime())) {
+      throw new Error("review payload.generated_at must be a valid ISO date-time");
+    }
+    const normalizedRawOutputRef = String(payload.raw_output_ref ?? rawOutputRef).trim();
+    if (!normalizedRawOutputRef) {
+      throw new Error("review payload.raw_output_ref is required");
+    }
 
     return {
       schema_version: 1,
       task_id: taskId,
-      model: String(payload?.model ?? defaultModel),
+      model,
       verdict,
       blocking,
       non_blocking: nonBlocking,
-      summary: String(payload?.summary ?? `${reviewerId} review ${verdict.toLowerCase()}`),
+      summary,
       confidence,
       next_action: nextAction,
-      generated_at: typeof payload?.generated_at === "string" ? payload.generated_at : nowIso(),
-      raw_output_ref: String(payload?.raw_output_ref ?? rawOutputRef)
+      generated_at: generatedAt,
+      raw_output_ref: normalizedRawOutputRef
     };
   }
 
-  processReviewer(reviewerId: "codex" | "claude"): number {
+  processReviewer(reviewerId: string): number {
+    const reviewer = this.reviewerProfileById[reviewerId];
+    if (!reviewer) {
+      throw new Error(`Unknown reviewer: ${reviewerId}`);
+    }
     let actions = 0;
     const messages = this.mailbox.consume(reviewerId, 100);
     for (const item of messages) {
@@ -897,20 +814,19 @@ export class PocRuntime {
       let reviewPayload: any;
       if (this.reviewerMode === "cli") {
         try {
-          const cli = this.executeReviewerCli(reviewerId, item.envelope);
-          reviewPayload = this.normalizeReviewPayload(reviewerId, item.envelope.task_id, cli.payload, cli.rawOutputRef);
+          const cli = this.executeReviewerCli(reviewer, item.envelope);
+          reviewPayload = this.normalizeReviewPayload(reviewer, item.envelope.task_id, cli.payload, cli.rawOutputRef);
         } catch (error) {
           const errCode =
             error instanceof ReviewerCliError ? error.code : "REVIEWER_EXECUTION_ERROR";
           const rawOutputRef =
             error instanceof ReviewerCliError
               ? error.rawOutputRef
-              : `artifact://${item.envelope.task_id}/${reviewerId}/execution-error/${Date.now()}`;
+              : `artifact://${item.envelope.task_id}/${reviewer.id}/execution-error/${Date.now()}`;
           reviewPayload = {
             schema_version: 1,
             task_id: item.envelope.task_id,
-            model:
-              this.reviewerModelById[reviewerId] ?? (reviewerId === "codex" ? "gpt-5-codex" : "claude-sonnet"),
+            model: reviewer.model ?? (reviewer.provider === "codex" ? "gpt-5-codex" : "claude-sonnet"),
             verdict: "FAIL",
             blocking: [
               {
@@ -921,7 +837,7 @@ export class PocRuntime {
               }
             ],
             non_blocking: [],
-            summary: `${reviewerId} CLI execution failed`,
+            summary: `${reviewer.id} CLI execution failed`,
             confidence: "medium",
             next_action: "manual_review_required",
             generated_at: nowIso(),
@@ -930,7 +846,7 @@ export class PocRuntime {
         }
       } else {
         const instruction = String(item.envelope?.payload?.instruction ?? "");
-        const forceFail = instruction.includes(`force-fail:${reviewerId}`);
+        const forceFail = instruction.includes(`force-fail:${reviewer.id}`);
         const blocking = forceFail
           ? [
               {
@@ -945,23 +861,22 @@ export class PocRuntime {
         reviewPayload = {
           schema_version: 1,
           task_id: item.envelope.task_id,
-          model:
-            this.reviewerModelById[reviewerId] ?? (reviewerId === "codex" ? "gpt-5-codex" : "claude-sonnet"),
+          model: reviewer.model ?? (reviewer.provider === "codex" ? "gpt-5-codex" : "claude-sonnet"),
           verdict: forceFail ? "FAIL" : "PASS",
           blocking,
           non_blocking: [],
-          summary: forceFail ? `${reviewerId} found blocking issue` : `${reviewerId} review passed`,
+          summary: forceFail ? `${reviewer.id} found blocking issue` : `${reviewer.id} review passed`,
           confidence: "high",
           next_action: forceFail ? "rework" : "proceed",
           generated_at: nowIso(),
-          raw_output_ref: `artifact://${item.envelope.task_id}/${reviewerId}/${Date.now()}`
+          raw_output_ref: `artifact://${item.envelope.task_id}/${reviewer.id}/${Date.now()}`
         };
       }
 
       const reviewEnvelope = this.createEnvelope({
         taskId: item.envelope.task_id,
-        senderId: reviewerId,
-        to: "aggregator",
+        senderId: reviewer.id,
+        to: this.aggregatorId,
         type: "review_result",
         payload: reviewPayload,
         stateVersion: item.envelope.state_version + 1,
@@ -975,7 +890,7 @@ export class PocRuntime {
 
   processAggregator(): number {
     let actions = 0;
-    const messages = this.mailbox.consume("aggregator", 100);
+    const messages = this.mailbox.consume(this.aggregatorId, 100);
     for (const item of messages) {
       const validation = validateEnvelope(item.envelope, this.validationOptions);
       if (!validation.ok) {
@@ -1041,8 +956,8 @@ export class PocRuntime {
 
       const aggregationEnvelope = this.createEnvelope({
         taskId: item.envelope.task_id,
-        senderId: "aggregator",
-        to: "orchestrator",
+        senderId: this.aggregatorId,
+        to: this.orchestratorId,
         type: "aggregation_result",
         payload: aggregationPayload,
         stateVersion: item.envelope.state_version + 1,
@@ -1057,7 +972,7 @@ export class PocRuntime {
 
   processOrchestrator(): number {
     let actions = 0;
-    const messages = this.mailbox.consume("orchestrator", 100);
+    const messages = this.mailbox.consume(this.orchestratorId, 100);
     for (const item of messages) {
       const validation = validateEnvelope(item.envelope, this.validationOptions);
       if (!validation.ok) {
@@ -1094,8 +1009,9 @@ export class PocRuntime {
 
   runOnePass(): number {
     let actions = 0;
-    actions += this.processReviewer("codex");
-    actions += this.processReviewer("claude");
+    for (const reviewer of this.reviewerProfiles) {
+      actions += this.processReviewer(reviewer.id);
+    }
     actions += this.processAggregator();
     actions += this.processOrchestrator();
     return actions;
@@ -1126,10 +1042,12 @@ export class PocRuntime {
   }
 
   injectTaskIdMismatchReview(taskId: string, payloadTaskId: string): string {
+    const senderId = this.reviewerProfiles[0]?.id ?? "codex";
+    const sender = this.reviewerProfileById[senderId];
     const payload = {
       schema_version: 1,
       task_id: payloadTaskId,
-      model: "gpt-5-codex",
+      model: sender?.model ?? (sender?.provider === "claude" ? "claude-sonnet" : "gpt-5-codex"),
       verdict: "PASS",
       blocking: [],
       non_blocking: [],
@@ -1141,8 +1059,8 @@ export class PocRuntime {
     };
     const envelope = this.createEnvelope({
       taskId,
-      senderId: "codex",
-      to: "aggregator",
+      senderId,
+      to: this.aggregatorId,
       type: "review_result",
       payload,
       stateVersion: 9
@@ -1174,5 +1092,25 @@ export class PocRuntime {
 
   deadletterCount(agentId: string): number {
     return this.mailbox.deadletterCount(agentId);
+  }
+
+  getReviewerProfiles(): ReviewerAgentProfile[] {
+    return [...this.reviewerProfiles];
+  }
+
+  getOrchestratorId(): string {
+    return this.orchestratorId;
+  }
+
+  getAggregatorId(): string {
+    return this.aggregatorId;
+  }
+
+  getDeadletterCounts(): Record<string, number> {
+    const result: Record<string, number> = {};
+    for (const principalId of this.principalIds) {
+      result[principalId] = this.deadletterCount(principalId);
+    }
+    return result;
   }
 }

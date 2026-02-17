@@ -1,17 +1,28 @@
 // @ts-nocheck
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { PocRuntime } from "./runtime";
+import { buildRuntimeAgentConfigFromDefinitions } from "./modules/agent-definition-policy";
 
 function readArg(name: string, defaultValue: string): string {
-  const index = process.argv.indexOf(name);
-  if (index === -1 || index + 1 >= process.argv.length) {
-    return defaultValue;
+  for (let index = process.argv.length - 1; index >= 0; index -= 1) {
+    if (process.argv[index] !== name) {
+      continue;
+    }
+    if (index + 1 >= process.argv.length) {
+      break;
+    }
+    return process.argv[index + 1];
   }
-  return process.argv[index + 1];
+  return defaultValue;
 }
 
 function hasFlag(name: string): boolean {
   return process.argv.includes(name);
+}
+
+function readJsonFile(filePath: string): any {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
 function main(): void {
@@ -28,6 +39,13 @@ function main(): void {
   const reviewInputExcerptChars = Number(readArg("--review-input-excerpt-chars", "24000"));
   const reviewInputIncludeDiff = hasFlag("--include-full-git-diff");
   const cliHomeMode = readArg("--cli-home-mode", "isolated");
+  const agentsConfigJson =
+    readArg("--agents-config-json", "").trim() || readArg("--agent-profiles-json", "").trim();
+  const agentConfig = agentsConfigJson ? readJsonFile(path.resolve(agentsConfigJson)) : null;
+  const derivedRuntimeConfig =
+    Array.isArray(agentConfig?.agents) && Number(agentConfig?.version) === 1
+      ? buildRuntimeAgentConfigFromDefinitions(agentConfig)
+      : null;
 
   const runtime = new PocRuntime({
     mailboxRoot,
@@ -36,6 +54,21 @@ function main(): void {
     cliTimeoutMs,
     codexModel,
     claudeModel,
+    reviewers: derivedRuntimeConfig
+      ? derivedRuntimeConfig.runtime.reviewers
+      : Array.isArray(agentConfig?.reviewers)
+      ? agentConfig.reviewers
+      : undefined,
+    orchestratorId: derivedRuntimeConfig
+      ? derivedRuntimeConfig.runtime.orchestrator_id
+      : typeof agentConfig?.orchestrator_id === "string"
+      ? agentConfig.orchestrator_id
+      : undefined,
+    aggregatorId: derivedRuntimeConfig
+      ? derivedRuntimeConfig.runtime.aggregator_id
+      : typeof agentConfig?.aggregator_id === "string"
+      ? agentConfig.aggregator_id
+      : undefined,
     reviewInputMaxChars,
     reviewInputExcerptChars,
     reviewInputIncludeDiff,
@@ -74,8 +107,13 @@ function main(): void {
     passes: run.passes,
     total_actions: run.totalActions,
     receipt_count: runtime.getReceiptCount(),
-    deadletter_aggregator: runtime.deadletterCount("aggregator"),
-    deadletter_orchestrator: runtime.deadletterCount("orchestrator"),
+    orchestrator_id: runtime.getOrchestratorId(),
+    aggregator_id: runtime.getAggregatorId(),
+    reviewer_agents: runtime.getReviewerProfiles(),
+    resolved_agent_definitions: derivedRuntimeConfig?.resolved?.agents ?? null,
+    deadletter_aggregator: runtime.deadletterCount(runtime.getAggregatorId()),
+    deadletter_orchestrator: runtime.deadletterCount(runtime.getOrchestratorId()),
+    deadletter_by_agent: runtime.getDeadletterCounts(),
     quarantine_count: runtime.getQuarantineRows().length,
     reviewer_failure_counts: reviewerFailureCounts,
     operational_gate: operationalGate,

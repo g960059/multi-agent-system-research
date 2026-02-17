@@ -1,5 +1,12 @@
 version: 1
 
+env_profiles:
+  codex-reviewer:
+    CODEX_SANDBOX: read-only
+    CODEX_MODE: full-auto
+  claude-reviewer: {}
+  local-default: {}
+
 defaults:
   input_schema_ref: schemas/poc/mailbox-envelope.v1.schema.json
   output_schema_ref: schemas/poc/review-result.v1.schema.json
@@ -19,21 +26,8 @@ agents:
     provider: codex
     model: gpt-5-codex
     prompt_file: prompts/reviewer/codex.md
-    allowed_message_types:
-      - task_assignment
-      - review_result
-    env:
-      CODEX_SANDBOX: read-only
-      CODEX_MODE: full-auto
-    command_template:
-      - codex
-      - exec
-      - --full-auto
-      - --sandbox
-      - read-only
-      - --cd
-      - "{repo_root}"
-      - "{prompt}"
+    instruction: Focus on security and architecture quality.
+    env_profile: codex-reviewer
 
   - id: claude
     name: Claude Reviewer
@@ -41,13 +35,26 @@ agents:
     provider: claude
     model: sonnet
     prompt_file: prompts/reviewer/claude.md
-    allowed_message_types:
-      - task_assignment
-      - review_result
-    command_template:
-      - claude
-      - -p
-      - "{prompt}"
+    instruction: Focus on performance and operational stability.
+    env_profile: claude-reviewer
+
+  - id: codex-architecture-reviewer
+    name: Codex Architecture Reviewer
+    role: architect
+    provider: codex
+    model: gpt-5.3-codex
+    prompt_file: prompts/reviewer/codex.md
+    instruction: Focus on module boundaries and adapter design.
+    env_profile: codex-reviewer
+
+  - id: codex-qa-tester
+    name: Codex QA Tester
+    role: qa_tester
+    provider: codex
+    model: gpt-5.3-codex
+    prompt_file: prompts/reviewer/codex.md
+    instruction: Focus on missing tests and regression risk.
+    env_profile: codex-reviewer
 
   - id: aggregator
     name: Review Aggregator
@@ -57,9 +64,6 @@ agents:
     prompt_file: prompts/reviewer/aggregator.md
     input_schema_ref: schemas/poc/mailbox-envelope.v1.schema.json
     output_schema_ref: schemas/poc/aggregation-result.v1.schema.json
-    allowed_message_types:
-      - review_result
-      - aggregation_result
     spawn_policy: long_running
     max_concurrency: 8
     lease_ttl_sec: 300
@@ -68,9 +72,7 @@ agents:
     timeouts:
       soft_sec: 30
       hard_sec: 60
-    command_template:
-      - node
-      - dist/aggregator.js
+    env_profile: local-default
 
   - id: orchestrator
     name: Control Orchestrator
@@ -80,11 +82,6 @@ agents:
     prompt_file: prompts/reviewer/orchestrator.md
     input_schema_ref: schemas/poc/mailbox-envelope.v1.schema.json
     output_schema_ref: schemas/poc/process-manager-plan.v1.schema.json
-    allowed_message_types:
-      - task_assignment
-      - aggregation_result
-      - control
-      - error
     spawn_policy: long_running
     max_concurrency: 4
     lease_ttl_sec: 300
@@ -93,6 +90,4 @@ agents:
     timeouts:
       soft_sec: 30
       hard_sec: 60
-    command_template:
-      - node
-      - dist/orchestrator.js
+    env_profile: local-default

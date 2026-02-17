@@ -9,6 +9,11 @@
     "poc:runtime:cli": "npm run build && node dist/poc/runtime-main.js --reviewer-mode cli --max-passes 6 --cli-timeout-ms 240000 --review-input-max-chars 80000 --review-input-excerpt-chars 12000",
     "poc:cli:auth:sync": "npm run build && node dist/poc/cli-auth-sync.js",
     "poc:cli:check": "npm run build && node dist/poc/cli-preflight.js",
-    "poc:e2e": "npm run build && node dist/poc/e2e.js"
+    "poc:e2e": "npm run build && node dist/poc/e2e.js",
+    "skill:test:mailbox-parallel-review": "node --test agents/skills/mailbox-parallel-review/scripts/run_parallel_review.test.mjs",
+    "mailbox:review": "node scripts/mailbox/run_parallel_review.mjs --repo-root .",
+    "mailbox:review:cli": "npm run mailbox:review -- --reviewer-mode cli --cli-home-mode host",
+    "mailbox:review:deterministic": "npm run mailbox:review -- --reviewer-mode deterministic",
+    "mailbox:review:test": "node --test scripts/mailbox/run_parallel_review.test.mjs"
   }
 }

@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "env_profiles": {
+    "codex-reviewer": {
+      "CODEX_SANDBOX": "read-only",
+      "CODEX_MODE": "full-auto"
+    },
+    "claude-reviewer": {},
+    "local-default": {}
+  },
+  "agents": [
+    {
+      "id": "orchestrator",
+      "name": "Control Orchestrator",
+      "role": "orchestrator",
+      "provider": "local",
+      "model": "deterministic-v1",
+      "prompt_file": "prompts/reviewer/orchestrator.md",
+      "env_profile": "local-default"
+    },
+    {
+      "id": "aggregator",
+      "name": "Review Aggregator",
+      "role": "aggregator",
+      "provider": "local",
+      "model": "deterministic-v1",
+      "prompt_file": "prompts/reviewer/aggregator.md",
+      "env_profile": "local-default"
+    },
+    {
+      "id": "codex-security-reviewer",
+      "name": "Codex Security Reviewer",
+      "role": "reviewer",
+      "provider": "codex",
+      "model": "gpt-5.3-codex",
+      "prompt_file": "prompts/reviewer/codex.md",
+      "instruction": "Focus on security risks, auth flaws, injection vectors, and secret handling.",
+      "env_profile": "codex-reviewer"
+    },
+    {
+      "id": "claude-performance-reviewer",
+      "name": "Claude Performance Reviewer",
+      "role": "reviewer",
+      "provider": "claude",
+      "model": "claude-sonnet-4-5-20250929",
+      "prompt_file": "prompts/reviewer/claude.md",
+      "instruction": "Focus on performance bottlenecks, memory pressure, and concurrency behavior.",
+      "env_profile": "claude-reviewer"
+    },
+    {
+      "id": "codex-architecture-reviewer",
+      "name": "Codex Architecture Reviewer",
+      "role": "architect",
+      "provider": "codex",
+      "model": "gpt-5.3-codex",
+      "prompt_file": "prompts/reviewer/codex.md",
+      "instruction": "Focus on module boundaries, adapter contracts, and long-term maintainability.",
+      "env_profile": "codex-reviewer"
+    }
+  ]
+}
